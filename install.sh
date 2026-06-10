@@ -7,13 +7,10 @@
 #   curl -fsSL https://kslaboratory.github.io/kroot-docs/install.sh | bash -s -- --global
 #   curl -fsSL https://kslaboratory.github.io/kroot-docs/install.sh | bash -s -- --version 2.1.0
 #
-# Alternative:
-#   go install github.com/jikime/kroot-adk/cmd/kroot@latest
-
 set -euo pipefail
 
 # Configuration
-readonly REPO="kslaboratory/kroot-adk"
+readonly REPO="kslaboratory/kroot-docs"
 readonly BINARY_NAME="kroot"
 readonly WT_BINARY_NAME="kroot-wt"
 readonly SYMLINK_NAME="kroot"
@@ -464,9 +461,6 @@ usage() {
     echo "Environment variables:"
     echo "  GITHUB_TOKEN  GitHub personal access token (increases API rate limit)"
     echo "  GH_TOKEN      Alternative token variable (used by gh CLI)"
-    echo ""
-    echo "Alternative installation:"
-    echo "  go install github.com/jikime/kroot-adk/cmd/kroot@latest"
     exit 0
 }
 
