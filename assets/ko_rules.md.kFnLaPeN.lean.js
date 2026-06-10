@@ -1,0 +1,1 @@
+import{_ as e,o as t,c as s,ag as i}from"./chunks/framework.VvOSaRrC.js";const k=JSON.parse('{"title":"규칙과 원칙","description":"","frontmatter":{},"headers":[],"relativePath":"ko/rules.md","filePath":"ko/rules.md"}'),l={name:"ko/rules.md"};function o(n,a,r,d,h,p){return t(),s("div",null,[...a[0]||(a[0]=[i("",10)])])}const g=e(l,[["render",o]]);export{k as __pageData,g as default};

@@ -1,0 +1,1 @@
+import{_ as s,o as e,c as i,ag as t}from"./chunks/framework.VvOSaRrC.js";const k=JSON.parse('{"title":"Sync 워크플로우","description":"","frontmatter":{},"headers":[],"relativePath":"ko/sync.md","filePath":"ko/sync.md"}'),n={name:"ko/sync.md"};function o(p,a,l,c,d,r){return e(),i("div",null,[...a[0]||(a[0]=[t("",9)])])}const g=s(n,[["render",o]]);export{k as __pageData,g as default};
