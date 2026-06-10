@@ -249,9 +249,11 @@ verify_checksum() {
         return 0
     fi
 
-    # Find expected checksum
+    # Find expected checksum — exact filename match, first line only.
+    # (grep substring matching breaks on duplicate or prefix-overlapping
+    # entries, e.g. kroot-* glob listing kroot-wt-* twice)
     local expected_hash
-    expected_hash=$(grep "$asset_name" "$checksums_file" | awk '{print $1}')
+    expected_hash=$(awk -v name="$asset_name" '$2 == name {print $1; exit}' "$checksums_file")
 
     if [ -z "$expected_hash" ]; then
         dim "Warning: Checksum not found for $asset_name, skipping verification"
