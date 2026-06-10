@@ -124,11 +124,12 @@ detect_platform() {
     os="$(uname -s)"
 
     case "$os" in
-        Darwin) echo "darwin" ;;
-        Linux)  echo "linux" ;;
+        Darwin)                 echo "darwin" ;;
+        Linux)                  echo "linux" ;;
+        MINGW*|MSYS*|CYGWIN*)   echo "windows" ;;
         *)
             error "Unsupported platform: $os"
-            echo "  Supported: macOS (darwin), Linux"
+            echo "  Supported: macOS (darwin), Linux, Windows (Git Bash/MSYS)"
             exit 1
             ;;
     esac
@@ -137,6 +138,13 @@ detect_platform() {
 detect_arch() {
     local arch
     arch="$(uname -m)"
+
+    # Windows ARM64 Git Bash runs under x86_64 emulation: uname -m reports
+    # x86_64 but uname -s carries the real machine arch (e.g.
+    # MINGW64_NT-10.0-26200-ARM64). Trust the -s marker when present.
+    case "$(uname -s)" in
+        *ARM64*|*aarch64*) echo "arm64"; return ;;
+    esac
 
     case "$arch" in
         x86_64|amd64)       echo "amd64" ;;
@@ -203,7 +211,7 @@ download_binary() {
     local dest="$4"
     local binary_name="${5:-$BINARY_NAME}"
 
-    local asset_name="${binary_name}-${platform}-${arch}"
+    local asset_name="${binary_name}-${platform}-${arch}${BIN_EXT}"
     local download_url="${DOWNLOAD_BASE}/v${version}/${asset_name}"
 
     local attempt=0
@@ -231,7 +239,7 @@ verify_checksum() {
     local arch="$4"
     local binary_name="${5:-$BINARY_NAME}"
 
-    local asset_name="${binary_name}-${platform}-${arch}"
+    local asset_name="${binary_name}-${platform}-${arch}${BIN_EXT}"
     local checksums_url="${DOWNLOAD_BASE}/v${version}/checksums.txt"
 
     # Download checksums.txt
@@ -334,7 +342,7 @@ verify_path() {
 
 verify_installation() {
     local install_dir="$1"
-    local binary="${install_dir}/${BINARY_NAME}"
+    local binary="${install_dir}/${BINARY_NAME}${BIN_EXT}"
 
     if [ ! -x "$binary" ]; then
         error "Installation verification failed: binary not found at $binary"
@@ -515,6 +523,16 @@ main() {
     arch=$(detect_arch)
     info "Platform: ${platform}/${arch}"
 
+    BIN_EXT=""
+    if [ "$platform" = "windows" ]; then
+        BIN_EXT=".exe"
+        if [ "$USE_SUDO" = true ]; then
+            error "--global is not supported on Windows (no sudo in Git Bash)"
+            echo "  Default user install goes to ${DEFAULT_INSTALL_DIR}"
+            exit 1
+        fi
+    fi
+
     # Step 3: Get version
     local version
     if [ -n "$TARGET_VERSION" ]; then
@@ -528,8 +546,8 @@ main() {
 
     # Step 4: Create temp directory
     TMP_DIR=$(mktemp -d)
-    local tmp_adk="${TMP_DIR}/${BINARY_NAME}-${platform}-${arch}"
-    local tmp_wt="${TMP_DIR}/${WT_BINARY_NAME}-${platform}-${arch}"
+    local tmp_adk="${TMP_DIR}/${BINARY_NAME}-${platform}-${arch}${BIN_EXT}"
+    local tmp_wt="${TMP_DIR}/${WT_BINARY_NAME}-${platform}-${arch}${BIN_EXT}"
 
     # Step 5: Download binaries
     info "Downloading ${BINARY_NAME} v${version}..."
@@ -561,14 +579,17 @@ main() {
     if [ "$USE_SUDO" = true ]; then
         dim "Sudo access required for /usr/local/bin installation"
     fi
-    install_binary "$tmp_adk" "$INSTALL_DIR" "$BINARY_NAME"
-    install_binary "$tmp_wt" "$INSTALL_DIR" "$WT_BINARY_NAME"
+    install_binary "$tmp_adk" "$INSTALL_DIR" "${BINARY_NAME}${BIN_EXT}"
+    install_binary "$tmp_wt" "$INSTALL_DIR" "${WT_BINARY_NAME}${BIN_EXT}"
     success "Binaries installed"
 
-    # Step 8: Create symlink (kroot -> kroot)
-    info "Creating symlink: ${SYMLINK_NAME} -> ${BINARY_NAME}..."
-    create_symlink "$INSTALL_DIR"
-    success "Symlink created"
+    # Step 8: Create symlink (skipped when names match — a self-symlink
+    # would delete the installed binary — and on Windows)
+    if [ "${SYMLINK_NAME}" != "${BINARY_NAME}" ] && [ "$platform" != "windows" ]; then
+        info "Creating symlink: ${SYMLINK_NAME} -> ${BINARY_NAME}..."
+        create_symlink "$INSTALL_DIR"
+        success "Symlink created"
+    fi
 
     # Step 9: Verify PATH
     verify_path "$INSTALL_DIR"
