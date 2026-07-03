@@ -14,8 +14,6 @@ readonly REPO="kslaboratory/kroot-docs"
 readonly BINARY_NAME="kroot"
 readonly WT_BINARY_NAME="kroot-wt"
 readonly SYMLINK_NAME="kroot"
-readonly WEBCHAT_ASSET_PREFIX="kroot-webchat"
-readonly WEBCHAT_DIR="${HOME}/.kroot/webchat"
 readonly DEFAULT_INSTALL_DIR="${HOME}/.local/bin"
 readonly GLOBAL_INSTALL_DIR="/usr/local/bin"
 readonly RELEASES_URL="https://api.github.com/repos/${REPO}/releases"
@@ -37,7 +35,6 @@ INSTALL_DIR="${DEFAULT_INSTALL_DIR}"
 TARGET_VERSION=""
 USE_SUDO=false
 NO_COLOR=false
-SKIP_WEBCHAT=false
 
 # Cleanup handler
 TMP_DIR=""
@@ -361,76 +358,6 @@ verify_installation() {
     fi
 }
 
-# ─── Webchat Installation ─────────────────────────────────────────
-
-install_webchat() {
-    local version="$1"
-    local asset_name="${WEBCHAT_ASSET_PREFIX}-v${version}.tar.gz"
-    local download_url="${DOWNLOAD_BASE}/v${version}/${asset_name}"
-
-    info "Installing webchat v${version}..."
-
-    # Node.js 확인
-    if ! command -v node &>/dev/null; then
-        dim "Node.js not found. Skipping webchat installation."
-        dim "Install Node.js 22+ and run: kroot webchat install"
-        return 0
-    fi
-
-    # pnpm 확인 (없으면 설치)
-    if ! command -v pnpm &>/dev/null; then
-        info "Installing pnpm..."
-        npm install -g pnpm 2>/dev/null || corepack enable 2>/dev/null || true
-        if ! command -v pnpm &>/dev/null; then
-            dim "pnpm installation failed. Skipping webchat installation."
-            dim "Install pnpm and run: kroot webchat install"
-            return 0
-        fi
-    fi
-
-    # 기존 소스 정리 (node_modules, .next 보존)
-    mkdir -p "$WEBCHAT_DIR"
-    if [ -d "$WEBCHAT_DIR" ]; then
-        find "$WEBCHAT_DIR" -maxdepth 1 -mindepth 1 \
-            ! -name 'node_modules' \
-            ! -name '.next' \
-            ! -name '.env' \
-            ! -name '.env.local' \
-            -exec rm -rf {} + 2>/dev/null || true
-    fi
-
-    # 다운로드 + 해제
-    local tmp_webchat="${TMP_DIR}/${asset_name}"
-    if ! curl -fsSL -o "$tmp_webchat" "$download_url" 2>/dev/null; then
-        dim "Webchat asset not found in release v${version}."
-        dim "Run 'kroot webchat install' after release is updated."
-        return 0
-    fi
-
-    tar -xzf "$tmp_webchat" -C "$WEBCHAT_DIR"
-    success "Webchat source extracted"
-
-    # pnpm install
-    info "Installing webchat dependencies..."
-    (cd "$WEBCHAT_DIR" && pnpm install --frozen-lockfile 2>/dev/null || pnpm install 2>/dev/null)
-    if [ $? -ne 0 ]; then
-        dim "pnpm install failed. Run manually: cd ${WEBCHAT_DIR} && pnpm install"
-        return 0
-    fi
-    success "Webchat dependencies installed"
-
-    # pnpm build
-    info "Building webchat..."
-    if (cd "$WEBCHAT_DIR" && pnpm build 2>/dev/null); then
-        success "Webchat build complete"
-    else
-        dim "Build failed. Run manually: cd ${WEBCHAT_DIR} && pnpm build"
-        return 0
-    fi
-
-    success "Webchat installed at ${WEBCHAT_DIR}"
-}
-
 print_success() {
     local install_dir="$1"
     echo ""
@@ -444,12 +371,8 @@ print_success() {
     dim "  ${install_dir}/${BINARY_NAME}"
     dim "  ${install_dir}/${WT_BINARY_NAME}"
     dim "  ${install_dir}/${SYMLINK_NAME} -> ${BINARY_NAME}"
-    if [ -f "${WEBCHAT_DIR}/package.json" ]; then
-        dim "  ${WEBCHAT_DIR} (webchat)"
-    fi
     echo ""
     dim "Run 'kroot --help' to get started."
-    dim "Run 'kroot webchat start' to launch webchat UI."
     dim "Run 'kroot update --check' to check for updates."
     echo ""
 }
@@ -464,7 +387,6 @@ usage() {
     echo "Options:"
     echo "  --global        Install to /usr/local/bin (requires sudo)"
     echo "  --version X     Install specific version (e.g., 2.1.0)"
-    echo "  --skip-webchat  Skip webchat UI installation"
     echo "  --no-color      Disable colored output"
     echo "  --help          Show this help message"
     echo ""
@@ -495,10 +417,6 @@ main() {
                 ;;
             --no-color)
                 NO_COLOR=true
-                shift
-                ;;
-            --skip-webchat)
-                SKIP_WEBCHAT=true
                 shift
                 ;;
             --help|-h)
@@ -598,15 +516,6 @@ main() {
 
     # Step 10: Verify installation
     verify_installation "$INSTALL_DIR"
-
-    # Step 11: Install webchat (optional)
-    if [ "$SKIP_WEBCHAT" = false ]; then
-        echo ""
-        install_webchat "$version"
-    else
-        dim "Webchat installation skipped (--skip-webchat)"
-        dim "Install later: kroot webchat install"
-    fi
 
     # Done
     print_success "$INSTALL_DIR"
