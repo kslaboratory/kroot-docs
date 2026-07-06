@@ -35,6 +35,7 @@ INSTALL_DIR="${DEFAULT_INSTALL_DIR}"
 TARGET_VERSION=""
 USE_SUDO=false
 NO_COLOR=false
+MODIFY_PATH=true
 
 # Cleanup handler
 TMP_DIR=""
@@ -306,13 +307,10 @@ create_symlink() {
     fi
 }
 
-verify_path() {
+# print_path_instructions prints the manual steps (used with --no-modify-path or
+# when automatic setup can't be done).
+print_path_instructions() {
     local install_dir="$1"
-
-    case ":$PATH:" in
-        *":${install_dir}:"*) return 0 ;;
-    esac
-
     echo ""
     dim "NOTE: ${install_dir} is not in your PATH."
     dim "Add it to your shell profile:"
@@ -337,6 +335,113 @@ verify_path() {
             dim "  export PATH=\"${install_dir}:\$PATH\""
             ;;
     esac
+}
+
+# add_to_shell_rc appends an idempotent PATH export to a POSIX shell rc file,
+# guarded by a marker so re-running the installer never duplicates it. Returns 0
+# when it wrote the entry, 1 when it was already present.
+add_to_shell_rc() {
+    local install_dir="$1" rc="$2"
+    local marker="# added by kroot-adk installer"
+    [ -f "$rc" ] || : > "$rc"
+    if grep -qF "$marker" "$rc" 2>/dev/null; then
+        return 1
+    fi
+    {
+        printf '\n%s\n' "$marker"
+        printf 'export PATH="%s:$PATH"\n' "$install_dir"
+    } >> "$rc"
+    return 0
+}
+
+# ensure_bashrc_sourced makes the user's bash LOGIN profile source ~/.bashrc, so
+# a new login shell (Git Bash always opens as one) actually loads the PATH entry
+# we wrote to ~/.bashrc. It targets the first existing login file
+# (~/.bash_profile > ~/.bash_login > ~/.profile), creating ~/.bash_profile only
+# when none exist, and is a no-op when ~/.bashrc is already sourced. Idempotent.
+ensure_bashrc_sourced() {
+    local login_rc=""
+    local f
+    for f in "${HOME}/.bash_profile" "${HOME}/.bash_login" "${HOME}/.profile"; do
+        if [ -f "$f" ]; then login_rc="$f"; break; fi
+    done
+    [ -z "$login_rc" ] && login_rc="${HOME}/.bash_profile"
+
+    # Already sources ~/.bashrc (via `. ~/.bashrc` or `source ~/.bashrc`)? done.
+    if [ -f "$login_rc" ] && grep -Eq '(^|[^#[:alnum:]])(source|\.)[[:space:]]+.*\.bashrc' "$login_rc" 2>/dev/null; then
+        return 0
+    fi
+    local marker="# added by kroot-adk installer"
+    if grep -qF "$marker" "$login_rc" 2>/dev/null; then
+        return 0
+    fi
+    printf '\n%s\n[ -f ~/.bashrc ] && . ~/.bashrc\n' "$marker" >> "$login_rc"
+    dim "  Ensured ${login_rc} sources ~/.bashrc (for login shells / Git Bash)."
+}
+
+# ensure_path makes the install dir usable as a command: it's a no-op when the
+# dir is already on PATH, prints manual steps under --no-modify-path, otherwise
+# automatically wires the dir into the shell rc (and, on Windows, the user PATH).
+ensure_path() {
+    local install_dir="$1" platform="$2"
+
+    case ":$PATH:" in
+        *":${install_dir}:"*) return 0 ;;
+    esac
+
+    if [ "$MODIFY_PATH" != true ]; then
+        print_path_instructions "$install_dir"
+        return 0
+    fi
+
+    echo ""
+    info "Adding ${install_dir} to your PATH..."
+
+    local shell_name rc
+    shell_name="$(basename "${SHELL:-/bin/bash}")"
+
+    if [ "$shell_name" = "fish" ]; then
+        local fconf="${HOME}/.config/fish/config.fish"
+        mkdir -p "${HOME}/.config/fish"
+        if grep -qF "kroot-adk installer" "$fconf" 2>/dev/null; then
+            dim "  ${fconf} already has the kroot PATH entry."
+        else
+            printf '\n# added by kroot-adk installer\nfish_add_path %s\n' "$install_dir" >> "$fconf"
+            success "Updated ${fconf}"
+        fi
+        rc="$fconf"
+    else
+        case "$shell_name" in
+            zsh)  rc="${ZDOTDIR:-$HOME}/.zshrc" ;;
+            bash) rc="${HOME}/.bashrc" ;;
+            *)    rc="${HOME}/.profile" ;;
+        esac
+        if add_to_shell_rc "$install_dir" "$rc"; then
+            success "Updated ${rc}"
+        else
+            dim "  ${rc} already has the kroot PATH entry."
+        fi
+    fi
+
+    # bash LOGIN shells (Git Bash on Windows, and Linux login shells) read
+    # ~/.bash_profile / ~/.profile — NOT ~/.bashrc directly. Make sure the login
+    # profile sources ~/.bashrc so a NEW terminal actually picks up the PATH
+    # entry we just wrote (otherwise it silently never loads on Git Bash).
+    if [ "$rc" = "${HOME}/.bashrc" ]; then
+        ensure_bashrc_sourced
+    fi
+
+    # PATH now persists for the NEXT shell, but this installer runs in a child
+    # process and cannot mutate the parent shell — so it can't `source` for you.
+    # Print the exact one-liner to enable kroot in the CURRENT terminal.
+    echo ""
+    dim "To use 'kroot' in THIS terminal right now, run:"
+    if [ "$NO_COLOR" = true ]; then
+        echo "    source ${rc}"
+    else
+        echo -e "    ${BOLD}source ${rc}${NC}"
+    fi
+    dim "(or just open a new terminal window)"
 }
 
 verify_installation() {
@@ -385,10 +490,11 @@ usage() {
     echo "  curl -fsSL https://kslaboratory.github.io/kroot-docs/install.sh | bash -s -- [options]"
     echo ""
     echo "Options:"
-    echo "  --global        Install to /usr/local/bin (requires sudo)"
-    echo "  --version X     Install specific version (e.g., 2.1.0)"
-    echo "  --no-color      Disable colored output"
-    echo "  --help          Show this help message"
+    echo "  --global          Install to /usr/local/bin (requires sudo)"
+    echo "  --version X       Install specific version (e.g., 2.1.0)"
+    echo "  --no-color        Disable colored output"
+    echo "  --no-modify-path  Do not add the install dir to PATH automatically"
+    echo "  --help            Show this help message"
     echo ""
     echo "Environment variables:"
     echo "  GITHUB_TOKEN  GitHub personal access token (increases API rate limit)"
@@ -417,6 +523,10 @@ main() {
                 ;;
             --no-color)
                 NO_COLOR=true
+                shift
+                ;;
+            --no-modify-path)
+                MODIFY_PATH=false
                 shift
                 ;;
             --help|-h)
@@ -511,8 +621,9 @@ main() {
         success "Symlink created"
     fi
 
-    # Step 9: Verify PATH
-    verify_path "$INSTALL_DIR"
+    # Step 9: Ensure the install dir is on PATH (auto-wire it; --no-modify-path
+    # to opt out). On Windows this also updates the user PATH for cmd/PowerShell.
+    ensure_path "$INSTALL_DIR" "$platform"
 
     # Step 10: Verify installation
     verify_installation "$INSTALL_DIR"
