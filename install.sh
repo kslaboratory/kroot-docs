@@ -438,19 +438,27 @@ ensure_path() {
         ensure_bashrc_sourced
     fi
 
+    # Show exactly what went into the rc file and how to apply it — the classic
+    # installer guidance. The installer runs in a child process and cannot mutate
+    # the parent shell, so it prints the `source` one-liner instead of running it.
     echo ""
-    if [ "$already_on_path" = true ]; then
-        dim "'kroot' already works in this shell; the entry above persists it for new terminals."
+    if [ "$shell_name" = "fish" ]; then
+        dim "Added to ${rc}:"
+        echo "    fish_add_path ${install_dir}"
+        dim "Apply it now:  source ${rc}   (or open a new terminal)"
     else
-        # This installer runs in a child process and can't mutate the parent
-        # shell, so print the exact one-liner to enable kroot right now.
-        dim "To use 'kroot' in THIS terminal right now, run:"
+        dim "Added to ${rc}:"
+        echo "    export PATH=\"${install_dir}:\$PATH\""
+        dim "Apply it in THIS terminal now, run:"
         if [ "$NO_COLOR" = true ]; then
             echo "    source ${rc}"
         else
             echo -e "    ${BOLD}source ${rc}${NC}"
         fi
         dim "(or just open a new terminal window)"
+    fi
+    if [ "$already_on_path" = true ]; then
+        dim "('kroot' already works in this shell — this just makes it explicit & persistent.)"
     fi
 }
 
