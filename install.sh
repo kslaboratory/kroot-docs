@@ -379,23 +379,31 @@ ensure_bashrc_sourced() {
     dim "  Ensured ${login_rc} sources ~/.bashrc (for login shells / Git Bash)."
 }
 
-# ensure_path makes the install dir usable as a command: it's a no-op when the
-# dir is already on PATH, prints manual steps under --no-modify-path, otherwise
-# automatically wires the dir into the shell rc (and, on Windows, the user PATH).
+# ensure_path wires the install dir into the shell rc so kroot is always found.
+# It ALWAYS writes an (idempotent) rc entry — even when the dir already happens
+# to be on PATH (e.g. Git Bash's /etc/profile adds ~/.local/bin) — so the entry
+# is explicit and persistent rather than relying on that environment quirk.
+# --no-modify-path prints manual steps instead.
 ensure_path() {
     local install_dir="$1" platform="$2"
 
+    local already_on_path=false
     case ":$PATH:" in
-        *":${install_dir}:"*) return 0 ;;
+        *":${install_dir}:"*) already_on_path=true ;;
     esac
 
     if [ "$MODIFY_PATH" != true ]; then
-        print_path_instructions "$install_dir"
+        if [ "$already_on_path" = true ]; then
+            echo ""
+            success "${install_dir} is already on your PATH — 'kroot' is ready."
+        else
+            print_path_instructions "$install_dir"
+        fi
         return 0
     fi
 
     echo ""
-    info "Adding ${install_dir} to your PATH..."
+    info "Ensuring ${install_dir} is on your PATH..."
 
     local shell_name rc
     shell_name="$(basename "${SHELL:-/bin/bash}")"
@@ -425,23 +433,25 @@ ensure_path() {
 
     # bash LOGIN shells (Git Bash on Windows, and Linux login shells) read
     # ~/.bash_profile / ~/.profile — NOT ~/.bashrc directly. Make sure the login
-    # profile sources ~/.bashrc so a NEW terminal actually picks up the PATH
-    # entry we just wrote (otherwise it silently never loads on Git Bash).
+    # profile sources ~/.bashrc so a NEW terminal actually picks up the entry.
     if [ "$rc" = "${HOME}/.bashrc" ]; then
         ensure_bashrc_sourced
     fi
 
-    # PATH now persists for the NEXT shell, but this installer runs in a child
-    # process and cannot mutate the parent shell — so it can't `source` for you.
-    # Print the exact one-liner to enable kroot in the CURRENT terminal.
     echo ""
-    dim "To use 'kroot' in THIS terminal right now, run:"
-    if [ "$NO_COLOR" = true ]; then
-        echo "    source ${rc}"
+    if [ "$already_on_path" = true ]; then
+        dim "'kroot' already works in this shell; the entry above persists it for new terminals."
     else
-        echo -e "    ${BOLD}source ${rc}${NC}"
+        # This installer runs in a child process and can't mutate the parent
+        # shell, so print the exact one-liner to enable kroot right now.
+        dim "To use 'kroot' in THIS terminal right now, run:"
+        if [ "$NO_COLOR" = true ]; then
+            echo "    source ${rc}"
+        else
+            echo -e "    ${BOLD}source ${rc}${NC}"
+        fi
+        dim "(or just open a new terminal window)"
     fi
-    dim "(or just open a new terminal window)"
 }
 
 verify_installation() {
