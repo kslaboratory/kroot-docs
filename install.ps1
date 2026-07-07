@@ -35,6 +35,12 @@ $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 may default to TLS 1.0/1.1; GitHub requires TLS 1.2+.
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
+# Invoke-WebRequest's progress bar makes downloads pathologically slow on Windows
+# PowerShell 5.1, so silence it (the kroot binary is small; we print our own
+# "Downloading…" line). winget is a separate process, so its own live progress
+# bar for the Node/Claude/Git installs is unaffected by this.
+$ProgressPreference = 'SilentlyContinue'
+
 $Repo         = 'kslaboratory/kroot-docs'
 $ReleasesApi  = "https://api.github.com/repos/$Repo/releases"
 $DownloadBase = "https://github.com/$Repo/releases/download"
@@ -120,16 +126,20 @@ function Add-ToUserPath($dir) {
 # ── prerequisites via winget ─────────────────────────────────────────
 function Test-Winget { [bool](Get-Command winget -ErrorAction SilentlyContinue) }
 
-function Install-WingetPackage($id, $name) {
+function Install-WingetPackage($id, $name, $step, $total) {
+    $prefix = if ($step) { "[$step/$total] " } else { '' }
     $listed = winget list --id $id -e --accept-source-agreements 2>$null | Out-String
-    if ($listed -match [regex]::Escape($id)) { Write-Ok "$name is already installed."; return }
-    Write-Info "Installing $name ($id)..."
+    if ($listed -match [regex]::Escape($id)) { Write-Ok "${prefix}$name is already installed."; return }
+    Write-Info "${prefix}Installing $name ($id) — this may take a few minutes..."
+    # NOTE: no `| Out-Null` here on purpose — winget prints its own live progress
+    # bar (download %, install spinner), so the user sees the install advancing.
+    # --silent keeps the underlying app installer quiet (no extra GUI windows).
     winget install --id $id -e --source winget --silent `
-        --accept-package-agreements --accept-source-agreements | Out-Null
+        --accept-package-agreements --accept-source-agreements
     if ($LASTEXITCODE -eq 0) {
-        Write-Ok "$name installed."
+        Write-Ok "${prefix}$name installed."
     } else {
-        Write-Warn "$name install returned exit code $LASTEXITCODE — you may need to install it manually."
+        Write-Warn "${prefix}$name install returned exit code $LASTEXITCODE — you may need to install it manually."
     }
 }
 
@@ -139,17 +149,19 @@ function Install-Dependencies {
         Write-Dim 'Install winget (App Installer) from the Microsoft Store, or install those tools manually.'
         return
     }
-    Write-Info 'Installing prerequisites via winget...'
-    # Node.js — required by `kroot chat start` (the node chat executor).
-    Install-WingetPackage 'OpenJS.NodeJS.LTS' 'Node.js (LTS)'
-    # Claude Code — native Windows install (no npm needed).
-    Install-WingetPackage 'Anthropic.ClaudeCode' 'Claude Code'
-    # Git for Windows — OPTIONAL: gives Claude Code a real bash for its Bash tool.
-    if (-not $SkipGitBash) {
-        Install-WingetPackage 'Git.Git' 'Git for Windows (Git Bash)'
-    } else {
-        Write-Dim 'Skipping Git for Windows (--SkipGitBash); Claude Code will use PowerShell as its shell tool.'
+    # Build the list first so we can show "[i/N]" step progress.
+    $pkgs = @(
+        @{ id = 'OpenJS.NodeJS.LTS';    name = 'Node.js (LTS)' }   # for the kroot chat executor
+        @{ id = 'Anthropic.ClaudeCode'; name = 'Claude Code' }      # native install, no npm
+    )
+    # Git for Windows is OPTIONAL — it gives Claude Code a real bash for its Bash tool.
+    if (-not $SkipGitBash) { $pkgs += @{ id = 'Git.Git'; name = 'Git for Windows (Git Bash)' } }
+
+    Write-Info "Installing $($pkgs.Count) prerequisite(s) via winget..."
+    for ($i = 0; $i -lt $pkgs.Count; $i++) {
+        Install-WingetPackage $pkgs[$i].id $pkgs[$i].name ($i + 1) $pkgs.Count
     }
+    if ($SkipGitBash) { Write-Dim 'Skipped Git for Windows (--SkipGitBash); Claude Code will use PowerShell as its shell tool.' }
 }
 
 # ── main ─────────────────────────────────────────────────────────────
