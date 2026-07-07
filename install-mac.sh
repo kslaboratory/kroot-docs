@@ -118,7 +118,12 @@ install_prereqs() {
   local step=0
   step=$((step + 1)); brew_install node   "Node.js"             "$step" "$total"
   if ! $SKIP_PYTHON; then step=$((step + 1)); brew_install python "Python (latest 3.x)" "$step" "$total"; fi
-  if ! command -v git >/dev/null 2>&1; then step=$((step + 1)); brew_install git "Git" "$step" "$total"; fi
+  # git usually ships with the Xcode CLT — confirm it (no brew step) or install it.
+  if command -v git >/dev/null 2>&1; then
+    ok "Git is already installed ($(command -v git))."
+  else
+    step=$((step + 1)); brew_install git "Git" "$step" "$total"
+  fi
   step=$((step + 1)); install_claude "$step" "$total"
 }
 
