@@ -12,8 +12,9 @@
   Options:
     -Version X.Y.Z   Install a specific kroot version (default: latest)
     -InstallDir P    Install directory (default: %USERPROFILE%\.local\bin)
-    -SkipDeps        Install only kroot — skip Node.js / Claude Code / Git for Windows
-    -SkipGitBash     Install kroot + Node + Claude Code, but NOT Git for Windows
+    -SkipDeps        Install only kroot — skip Node.js / Python / Claude Code / Git
+    -SkipPython      Install everything except Python
+    -SkipGitBash     Install everything except Git for Windows
                      (Git Bash is optional: without it Claude Code uses PowerShell
                      as its shell tool)
     -NoModifyPath    Do not add the install dir to your PATH
@@ -24,6 +25,7 @@ param(
     [string]$InstallDir = (Join-Path $env:USERPROFILE '.local\bin'),
     [switch]$SkipDeps,
     [switch]$SkipGitBash,
+    [switch]$SkipPython,
     [switch]$NoModifyPath
 )
 
@@ -169,17 +171,34 @@ function Install-WingetPackage($id, $name, $step, $total) {
     }
 }
 
+# Get-LatestPythonId returns the newest available Python.Python.3.x winget id
+# (so "latest Python" tracks new minor releases), falling back to a known-good
+# version if the search can't be parsed.
+function Get-LatestPythonId {
+    try {
+        $out = winget search --id 'Python.Python.3.' --source winget --accept-source-agreements 2>$null | Out-String
+        $found = [regex]::Matches($out, 'Python\.Python\.3\.(\d+)')
+        if ($found.Count -gt 0) {
+            $best = $found | Sort-Object { [int]$_.Groups[1].Value } -Descending | Select-Object -First 1
+            return $best.Value
+        }
+    } catch {}
+    return 'Python.Python.3.13'
+}
+
 function Install-Dependencies {
     if (-not (Test-Winget)) {
-        Write-Warn 'winget not found — skipping Node.js / Claude Code / Git for Windows.'
+        Write-Warn 'winget not found — skipping Node.js / Python / Claude Code / Git for Windows.'
         Write-Dim 'Install winget (App Installer) from the Microsoft Store, or install those tools manually.'
         return
     }
     # Build the list first so we can show "[i/N]" step progress.
     $pkgs = @(
         @{ id = 'OpenJS.NodeJS.LTS';    name = 'Node.js (LTS)' }   # for the kroot chat executor
-        @{ id = 'Anthropic.ClaudeCode'; name = 'Claude Code' }      # native install, no npm
     )
+    # Python (latest 3.x) — optional (--SkipPython).
+    if (-not $SkipPython) { $pkgs += @{ id = (Get-LatestPythonId); name = 'Python (latest 3.x)' } }
+    $pkgs += @{ id = 'Anthropic.ClaudeCode'; name = 'Claude Code' }   # native install, no npm
     # Git for Windows is OPTIONAL — it gives Claude Code a real bash for its Bash tool.
     if (-not $SkipGitBash) { $pkgs += @{ id = 'Git.Git'; name = 'Git for Windows (Git Bash)' } }
 
@@ -187,6 +206,7 @@ function Install-Dependencies {
     for ($i = 0; $i -lt $pkgs.Count; $i++) {
         Install-WingetPackage $pkgs[$i].id $pkgs[$i].name ($i + 1) $pkgs.Count
     }
+    if ($SkipPython)  { Write-Dim 'Skipped Python (--SkipPython).' }
     if ($SkipGitBash) { Write-Dim 'Skipped Git for Windows (--SkipGitBash); Claude Code will use PowerShell as its shell tool.' }
 }
 
@@ -234,6 +254,7 @@ try {
     Show-Tool 'kroot' 'kroot'
     if (-not $SkipDeps) {
         Show-Tool 'node'   'node'
+        if (-not $SkipPython) { Show-Tool 'python' 'python' }
         Show-Tool 'claude' 'claude'
         if (-not $SkipGitBash) { Show-Tool 'git' 'git' }
     }
