@@ -123,6 +123,32 @@ function Add-ToUserPath($dir) {
     if (($env:Path -split ';') -notcontains $dir) { $env:Path = "$dir;$env:Path" }
 }
 
+# Update-SessionPath rebuilds THIS session's $env:Path from the registry
+# (Machine + User) plus $extraDir. winget installers (Node, Claude Code, Git)
+# update the registry PATH but NOT the already-running shell, so without this the
+# new commands aren't found until you reopen the terminal. Order-preserving dedup.
+function Update-SessionPath($extraDir) {
+    $machine = [System.Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user    = [System.Environment]::GetEnvironmentVariable('Path', 'User')
+    $paths = @()
+    if ($extraDir) { $paths += $extraDir }
+    foreach ($p in @($machine, $user)) {
+        if ($p) { $paths += @($p -split ';' | Where-Object { $_ -ne '' }) }
+    }
+    $seen = @{}
+    $env:Path = (($paths | Where-Object { if ($seen.ContainsKey($_)) { $false } else { $seen[$_] = $true; $true } }) -join ';')
+}
+
+# Show-Tool prints where a command resolved (or a hint if not yet on PATH).
+function Show-Tool($cmd, $label) {
+    $c = Get-Command $cmd -ErrorAction SilentlyContinue
+    if ($c) {
+        Write-Ok ("{0,-8} {1}" -f $label, $c.Source)
+    } else {
+        Write-Dim ("{0,-8} not found yet — open a NEW terminal to use it." -f $label)
+    }
+}
+
 # ── prerequisites via winget ─────────────────────────────────────────
 function Test-Winget { [bool](Get-Command winget -ErrorAction SilentlyContinue) }
 
@@ -197,11 +223,23 @@ try {
     if (-not $SkipDeps) { Install-Dependencies }
     else { Write-Dim 'Skipped Node.js / Claude Code / Git for Windows (--SkipDeps).' }
 
+    # winget updated the registry PATH but not THIS shell — reload it so kroot,
+    # node, claude and git are usable right now, without reopening the terminal.
+    if (-not $NoModifyPath) { Update-SessionPath $InstallDir }
+
     Write-Host ''
     Write-Ok 'Installation complete!'
-    Write-Dim "Installed: $(Join-Path $InstallDir "$BinaryName.exe")"
     Write-Host ''
-    Write-Dim "Open a NEW terminal (so the updated PATH loads), then run:  kroot --help"
+    Write-Dim 'Installed (usable in THIS terminal now):'
+    Show-Tool 'kroot' 'kroot'
+    if (-not $SkipDeps) {
+        Show-Tool 'node'   'node'
+        Show-Tool 'claude' 'claude'
+        if (-not $SkipGitBash) { Show-Tool 'git' 'git' }
+    }
+    Write-Host ''
+    Write-Dim 'Try it now:  kroot --version'
+    Write-Dim '(If anything shows "not found yet", just open a new terminal.)'
     Write-Host ''
 } finally {
     Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
