@@ -111,18 +111,18 @@ install_prereqs() {
     dim "Install Homebrew from https://brew.sh and re-run, or pass --skip-deps."
     return 1
   fi
-  local total=2  # node + claude
+  local total=3  # node + git + claude
   $SKIP_PYTHON || total=$((total + 1))
-  command -v git >/dev/null 2>&1 || total=$((total + 1))
 
   local step=0
   step=$((step + 1)); brew_install node   "Node.js"             "$step" "$total"
   if ! $SKIP_PYTHON; then step=$((step + 1)); brew_install python "Python (latest 3.x)" "$step" "$total"; fi
-  # git usually ships with the Xcode CLT — confirm it (no brew step) or install it.
+  # git usually ships with the Xcode CLT — count it as a step either way.
+  step=$((step + 1))
   if command -v git >/dev/null 2>&1; then
-    ok "Git is already installed ($(command -v git))."
+    ok "[$step/$total] Git is already installed ($(command -v git))."
   else
-    step=$((step + 1)); brew_install git "Git" "$step" "$total"
+    brew_install git "Git" "$step" "$total"
   fi
   step=$((step + 1)); install_claude "$step" "$total"
 }
