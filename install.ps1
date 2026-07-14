@@ -18,6 +18,11 @@
                      (Git Bash is optional: without it Claude Code uses PowerShell
                      as its shell tool)
     -NoModifyPath    Do not add the install dir to your PATH
+
+  Uninstall (completely remove kroot):
+    & ([scriptblock]::Create((irm https://kslaboratory.github.io/kroot-docs/install.ps1))) -Uninstall
+    -Uninstall       Remove kroot / kroot-wt, %USERPROFILE%\.kroot, and the PATH entry
+    -KeepState       With -Uninstall: keep %USERPROFILE%\.kroot (login token & settings)
 #>
 [CmdletBinding()]
 param(
@@ -26,7 +31,9 @@ param(
     [switch]$SkipDeps,
     [switch]$SkipGitBash,
     [switch]$SkipPython,
-    [switch]$NoModifyPath
+    [switch]$NoModifyPath,
+    [switch]$Uninstall,
+    [switch]$KeepState
 )
 
 # StrictMode 1.0 catches uninitialized variables without the property-access
@@ -125,6 +132,112 @@ function Add-ToUserPath($dir) {
     if (($env:Path -split ';') -notcontains $dir) { $env:Path = "$dir;$env:Path" }
 }
 
+# Remove-FromUserPath drops $dir from the user PATH registry (order-preserving).
+function Remove-FromUserPath($dir) {
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    if (-not $userPath) { return }
+    $entries = @($userPath -split ';' | Where-Object { $_ -ne '' -and $_ -ne $dir })
+    $newPath = ($entries -join ';')
+    if ($newPath -ne $userPath.TrimEnd(';')) {
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+        Write-Ok "Removed $dir from your PATH (user)."
+    } else {
+        Write-Dim "$dir was not on your user PATH."
+    }
+}
+
+# ── uninstall ────────────────────────────────────────────────────────
+function Invoke-Uninstall {
+    Show-Banner
+    Write-Info 'Uninstalling KRoot-ADK...'
+
+    $stateDir = Join-Path $env:USERPROFILE '.kroot'
+
+    if (-not $KeepState) {
+        Write-Host ''
+        Write-Dim 'This will remove:'
+        Write-Dim "  * kroot.exe / kroot-wt.exe from known install dirs"
+        Write-Dim "  * $stateDir (login token, chat-executor, logs, uploads)"
+        Write-Dim "  * the PATH entry pointing at the install dir"
+    }
+
+    # 1) Stop the chat daemon while kroot.exe still exists (best-effort).
+    if (Get-Command kroot -ErrorAction SilentlyContinue) {
+        Write-Info 'Stopping chat daemon (if running)...'
+        try { & kroot chat stop 2>$null | Out-Null } catch {}
+    }
+
+    # 2) Collect candidate install dirs: -InstallDir, the default, wherever kroot
+    #    currently resolves, and GOPATH\bin (go install / make install).
+    $dirs = New-Object System.Collections.Generic.List[string]
+    foreach ($d in @($InstallDir, (Join-Path $env:USERPROFILE '.local\bin'))) {
+        if ($d) { $dirs.Add($d) }
+    }
+    $onPath = Get-Command kroot -ErrorAction SilentlyContinue
+    if ($onPath) { $dirs.Add((Split-Path $onPath.Source -Parent)) }
+    $goCmd = Get-Command go -ErrorAction SilentlyContinue
+    if ($goCmd) {
+        $gobin = (& go env GOBIN) 2>$null
+        if (-not $gobin) { $gp = (& go env GOPATH) 2>$null; if ($gp) { $gobin = Join-Path $gp 'bin' } }
+        if ($gobin) { $dirs.Add($gobin) }
+    }
+
+    # 3) Remove binaries.
+    Write-Host ''
+    Write-Info 'Removing binaries...'
+    $removed = $false
+    $seen = @{}
+    foreach ($d in $dirs) {
+        if (-not $d -or $seen.ContainsKey($d)) { continue }
+        $seen[$d] = $true
+        foreach ($f in @("$BinaryName.exe", "$WtBinaryName.exe")) {
+            $target = Join-Path $d $f
+            if (Test-Path $target) {
+                try {
+                    Remove-Item $target -Force -ErrorAction Stop
+                    Write-Ok "Removed $target"
+                    $removed = $true
+                } catch {
+                    Write-Err "Could not remove $target — it may be running. Close all kroot processes and retry."
+                }
+            }
+        }
+    }
+    if (-not $removed) { Write-Dim 'No kroot binaries found in known locations.' }
+
+    # 4) Remove user state.
+    Write-Host ''
+    if ($KeepState) {
+        Write-Dim "Keeping $stateDir (-KeepState)."
+    } elseif (Test-Path $stateDir) {
+        Write-Info "Removing $stateDir..."
+        try {
+            Remove-Item $stateDir -Recurse -Force -ErrorAction Stop
+            Write-Ok "Removed $stateDir"
+        } catch {
+            Write-Err "Could not remove $stateDir — $($_.Exception.Message)"
+        }
+    } else {
+        Write-Dim "$stateDir not found."
+    }
+
+    # 5) Clean PATH entries for every candidate dir.
+    Write-Host ''
+    Write-Info 'Cleaning PATH entries...'
+    $seen2 = @{}
+    foreach ($d in $dirs) {
+        if (-not $d -or $seen2.ContainsKey($d)) { continue }
+        $seen2[$d] = $true
+        Remove-FromUserPath $d
+    }
+
+    Write-Host ''
+    Write-Ok 'KRoot-ADK uninstalled.'
+    Write-Dim 'Open a NEW terminal so the updated PATH takes effect.'
+    Write-Dim 'Per-project files (.kroot\, CLAUDE.md) inside your projects are left untouched.'
+    Write-Dim 'Node.js / Python / Claude Code / Git were installed separately and are NOT removed.'
+}
+
 # Update-SessionPath rebuilds THIS session's $env:Path from the registry
 # (Machine + User) plus $extraDir. winget installers (Node, Claude Code, Git)
 # update the registry PATH but NOT the already-running shell, so without this the
@@ -211,6 +324,11 @@ function Install-Dependencies {
 }
 
 # ── main ─────────────────────────────────────────────────────────────
+if ($Uninstall) {
+    Invoke-Uninstall
+    return
+}
+
 Show-Banner
 
 $arch = Get-Arch

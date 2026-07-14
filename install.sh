@@ -36,6 +36,9 @@ TARGET_VERSION=""
 USE_SUDO=false
 NO_COLOR=false
 MODIFY_PATH=true
+DO_UNINSTALL=false
+ASSUME_YES=false
+KEEP_STATE=false
 
 # Cleanup handler
 TMP_DIR=""
@@ -500,6 +503,148 @@ print_success() {
     echo ""
 }
 
+# ─── Uninstall ──────────────────────────────────────────────────────
+
+# strip_rc_marker removes the "# added by kroot-adk installer" marker line and
+# the single payload line that follows it (PATH export / fish_add_path / bashrc
+# source) from an rc file. Idempotent; a no-op when the marker is absent.
+strip_rc_marker() {
+    local rc="$1"
+    [ -f "$rc" ] || return 0
+    grep -qF "# added by kroot-adk installer" "$rc" 2>/dev/null || return 0
+    local tmp
+    tmp="$(mktemp)"
+    awk '
+        skip { skip=0; next }                                   # drop line after marker
+        $0 == "# added by kroot-adk installer" { skip=1; next } # drop marker line
+        { print }
+    ' "$rc" > "$tmp" && cat "$tmp" > "$rc"
+    rm -f "$tmp"
+    dim "  Removed kroot PATH entry from ${rc}"
+}
+
+# remove_binaries deletes kroot / kroot-wt from every known install location and
+# from wherever they currently resolve on PATH.
+remove_binaries() {
+    local ext="$1"
+    # Known install locations: installer defaults + go install / make install.
+    local -a dirs=("${DEFAULT_INSTALL_DIR}" "${GLOBAL_INSTALL_DIR}" "${HOME}/go/bin")
+    # Where `kroot` actually resolves right now (may differ from the defaults).
+    local on_path
+    on_path="$(command -v kroot 2>/dev/null || true)"
+    [ -n "$on_path" ] && dirs+=("$(dirname "$on_path")")
+    # GOPATH/bin from the go toolchain (if present and different from ~/go/bin).
+    if command -v go &>/dev/null; then
+        local gobin
+        gobin="$(go env GOBIN 2>/dev/null || true)"
+        [ -z "$gobin" ] && gobin="$(go env GOPATH 2>/dev/null || true)/bin"
+        [ -n "$gobin" ] && [ "$gobin" != "/bin" ] && dirs+=("$gobin")
+    fi
+
+    local removed=false d f target seen=" "
+    for d in "${dirs[@]}"; do
+        [ -z "$d" ] && continue
+        case "$seen" in *" $d "*) continue ;; esac
+        seen="${seen}${d} "
+        for f in "${BINARY_NAME}${ext}" "${WT_BINARY_NAME}${ext}"; do
+            target="${d}/${f}"
+            if [ -e "$target" ] || [ -L "$target" ]; then
+                if rm -f "$target" 2>/dev/null; then
+                    success "Removed ${target}"
+                    removed=true
+                elif command -v sudo &>/dev/null && sudo rm -f "$target" 2>/dev/null; then
+                    success "Removed ${target} (sudo)"
+                    removed=true
+                else
+                    error "Could not remove ${target} (permission denied — try: sudo rm -f ${target})"
+                fi
+            fi
+        done
+    done
+    if [ "$removed" = false ]; then
+        dim "  No kroot binaries found in known locations."
+    fi
+    return 0
+}
+
+uninstall_kroot() {
+    print_banner
+    echo ""
+    info "Uninstalling KRoot-ADK..."
+
+    local platform ext=""
+    platform="$(detect_platform 2>/dev/null || echo unknown)"
+    [ "$platform" = "windows" ] && ext=".exe"
+
+    local state_dir="${HOME}/.kroot"
+
+    # Confirmation (skipped with --yes). No tty when piped from curl → require --yes.
+    if [ "$ASSUME_YES" != true ]; then
+        echo ""
+        dim "This will remove:"
+        dim "  • kroot / kroot-wt binaries (~/.local/bin, /usr/local/bin, GOPATH/bin)"
+        [ "$KEEP_STATE" = true ] && dim "  • (keeping ${state_dir} — login token & settings)" \
+                                 || dim "  • ${state_dir} (login token, chat-executor, logs, uploads)"
+        dim "  • the PATH entry added to your shell rc files"
+        echo ""
+        if [ -t 0 ]; then
+            printf "  Proceed? [y/N] "
+            local ans; read -r ans
+            case "$ans" in
+                y|Y|yes|YES) ;;
+                *) info "Aborted."; exit 0 ;;
+            esac
+        else
+            error "Refusing to uninstall non-interactively without confirmation."
+            echo "  Re-run with --yes to confirm:"
+            echo "    curl -fsSL .../install.sh | bash -s -- --uninstall --yes"
+            exit 1
+        fi
+    fi
+
+    # 1) Stop the chat daemon while the binary still exists (best-effort).
+    if command -v kroot &>/dev/null; then
+        info "Stopping chat daemon (if running)..."
+        kroot chat stop >/dev/null 2>&1 || true
+    fi
+
+    # 2) Remove binaries.
+    echo ""
+    info "Removing binaries..."
+    remove_binaries "$ext"
+
+    # 3) Remove user state (~/.kroot) unless --keep-state.
+    echo ""
+    if [ "$KEEP_STATE" = true ]; then
+        dim "  Keeping ${state_dir} (--keep-state)."
+    elif [ -d "$state_dir" ]; then
+        info "Removing ${state_dir}..."
+        if rm -rf "$state_dir" 2>/dev/null; then
+            success "Removed ${state_dir}"
+        else
+            error "Could not remove ${state_dir} (try: sudo rm -rf ${state_dir})"
+        fi
+    else
+        dim "  ${state_dir} not found."
+    fi
+
+    # 4) Strip the PATH entry from every rc file the installer may have touched.
+    echo ""
+    info "Cleaning shell PATH entries..."
+    strip_rc_marker "${HOME}/.zshrc"
+    strip_rc_marker "${HOME}/.bashrc"
+    strip_rc_marker "${HOME}/.bash_profile"
+    strip_rc_marker "${HOME}/.bash_login"
+    strip_rc_marker "${HOME}/.profile"
+    strip_rc_marker "${HOME}/.config/fish/config.fish"
+
+    echo ""
+    success "KRoot-ADK uninstalled."
+    dim "  Open a new terminal (or re-source your rc file) to drop the stale PATH entry."
+    dim "  Per-project files (.kroot/, CLAUDE.md) inside your projects are left untouched."
+    exit 0
+}
+
 usage() {
     echo "KRoot-ADK Installer"
     echo ""
@@ -512,7 +657,13 @@ usage() {
     echo "  --version X       Install specific version (e.g., 2.1.0)"
     echo "  --no-color        Disable colored output"
     echo "  --no-modify-path  Do not add the install dir to PATH automatically"
+    echo "  --uninstall       Completely remove kroot (binaries, ~/.kroot, PATH entry)"
+    echo "  --keep-state      With --uninstall: keep ~/.kroot (login token & settings)"
+    echo "  --yes, -y         Assume yes; required for non-interactive --uninstall"
     echo "  --help            Show this help message"
+    echo ""
+    echo "Uninstall:"
+    echo "  curl -fsSL https://kslaboratory.github.io/kroot-docs/install.sh | bash -s -- --uninstall --yes"
     echo ""
     echo "Environment variables:"
     echo "  GITHUB_TOKEN  GitHub personal access token (increases API rate limit)"
@@ -547,6 +698,18 @@ main() {
                 MODIFY_PATH=false
                 shift
                 ;;
+            --uninstall)
+                DO_UNINSTALL=true
+                shift
+                ;;
+            --keep-state)
+                KEEP_STATE=true
+                shift
+                ;;
+            --yes|-y)
+                ASSUME_YES=true
+                shift
+                ;;
             --help|-h)
                 usage
                 ;;
@@ -557,6 +720,11 @@ main() {
                 ;;
         esac
     done
+
+    # Uninstall short-circuits before any download/install work.
+    if [ "$DO_UNINSTALL" = true ]; then
+        uninstall_kroot
+    fi
 
     print_banner
 
