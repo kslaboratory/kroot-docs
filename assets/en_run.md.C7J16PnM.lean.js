@@ -1,0 +1,1 @@
+import{_ as e,o as a,c as s,ag as i}from"./chunks/framework.VvOSaRrC.js";const c=JSON.parse('{"title":"K.R.O.O.T.","description":"","frontmatter":{},"headers":[],"relativePath":"en/run.md","filePath":"en/run.md"}'),o={name:"en/run.md"};function n(r,t,l,h,d,p){return a(),s("div",null,[...t[0]||(t[0]=[i("",9)])])}const u=e(o,[["render",n]]);export{c as __pageData,u as default};
