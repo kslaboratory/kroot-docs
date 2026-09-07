@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
   KRoot-ADK installer for Windows (native PowerShell — no Git Bash needed).
 
@@ -55,9 +55,6 @@ $ReleasesApi  = "https://api.github.com/repos/$Repo/releases"
 $DownloadBase = "https://github.com/$Repo/releases/download"
 $BinaryName   = 'kroot'
 $WtBinaryName = 'kroot-wt'
-
-# kroot-studio 앱의 'AI코딩' 메뉴(prereqs.ts)와 동일한 Node.js 하한 기준(2026-09 정렬).
-$MinNodeVersion = '22.13.0'
 
 # ── output helpers ────────────────────────────────────────────────────
 function Write-Info($m) { Write-Host "  $m" -ForegroundColor Cyan }
@@ -267,281 +264,13 @@ function Show-Tool($cmd, $label) {
     }
 }
 
-# ── 설치 여부 감지 (install-for-kroot-adk.sh / kroot-studio 'AI코딩' prereqs.ts 와 동일 기준) ──
-# kroot-studio 의 detectPrereqs() 는 winget 등록 여부가 아니라 "실제로 <cmd> --version 을
-# 실행해 semver 를 파싱할 수 있는가"로 설치 여부를 판정한다. 아래 함수들은 그 판정 방식을
-# PowerShell 로 그대로 이식한 것 — winget install 을 시도하기 전에 먼저 이 기준으로 확인해,
-# 이미 설치돼 있으면 재설치하지 않고 다음 항목으로 넘어간다.
-
-function Get-VersionGE($a, $b) {
-    $pa = $a -split '\.' | ForEach-Object { [int]$_ }
-    $pb = $b -split '\.' | ForEach-Object { [int]$_ }
-    for ($i = 0; $i -lt 3; $i++) {
-        $ai = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }
-        $bi = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
-        if ($ai -gt $bi) { return $true }
-        if ($ai -lt $bi) { return $false }
-    }
-    return $true
-}
-
-function Get-SemVer([string]$output) {
-    if (-not $output) { return $null }
-    $m = [regex]::Match($output, '\d+\.\d+\.\d+')
-    if ($m.Success) { return $m.Value }
-    return $null
-}
-
-# GUI 로 뜬 프로세스는 로그인 셸 PATH 를 못 받아 반쪽 PATH 로 보이므로, 표준 설치 경로를
-# 보강한 뒤 실행한다(prereqs.ts 의 augmentedPath() 와 동일 목록).
-function Get-AugmentedPath {
-    $homeDir = $env:USERPROFILE
-    $programFiles   = if ($env:ProgramFiles)  { $env:ProgramFiles }  else { 'C:\Program Files' }
-    $localAppData   = if ($env:LOCALAPPDATA)  { $env:LOCALAPPDATA }  else { Join-Path $homeDir 'AppData\Local' }
-    $roamingAppData = if ($env:APPDATA)       { $env:APPDATA }       else { Join-Path $homeDir 'AppData\Roaming' }
-    $extra = @(
-        (Join-Path $programFiles 'nodejs'),                        # OpenJS.NodeJS.LTS
-        (Join-Path $programFiles 'Git\cmd'),                       # Git.Git
-        (Join-Path $localAppData 'Microsoft\WinGet\Links'),
-        (Join-Path $localAppData 'Programs\claude'),                # Claude Code 네이티브 설치기
-        (Join-Path $roamingAppData 'npm'),
-        (Join-Path $homeDir '.local\bin'),                          # kroot-adk INSTALL_DIR / Claude 네이티브 설치
-        (Join-Path $homeDir '.claude\local')
-    )
-    return ($extra -join ';') + ';' + $env:Path
-}
-
-# ConvertTo-QuotedArg — 공백/따옴표가 있는 인자만 감싼다(경로에 공백이 흔함, 예: "Program Files").
-function ConvertTo-QuotedArg([string]$arg) {
-    if ($arg -match '[\s"]') { return '"' + ($arg -replace '"', '\"') + '"' }
-    return $arg
-}
-
-# Invoke-VersionCheck — <cmd> <args> 를 실행해 stdout 을 반환한다(실패/5초 타임아웃은 $null).
-# ⚠ npm/nvm 로 설치된 CLI(claude 등)는 .cmd/.bat wrapper 뿐인 경우가 흔한데, .NET Process 를
-#   UseShellExecute=$false 로 직접 실행하면 배치파일은 CreateProcess 가 거부한다 — cmd.exe 를
-#   경유(`/d /c`)하면 PATHEXT 해석과 배치파일 실행이 둘 다 정상 동작한다(install-for-kroot-adk.sh
-#   의 runExec() 우회와 동일 이유·동일 해법).
-# ⚠ 실측(Windows PowerShell 5.1/.NET Framework): `ProcessStartInfo.ArgumentList` 프로퍼티가
-#   이 런타임에서 초기화되지 않은 채 $null 로 남아 `.Add()`가 예외를 던진다(.NET Core 전용 API가
-#   .NET Framework 5.1에는 온전히 배선돼 있지 않음) — 그래서 모든 감지가 조용히 실패하는 갭이
-#   실측으로 드러났다. 대신 `.Arguments`(단일 커맨드라인 문자열)를 직접 조립해 우회한다.
-function Invoke-VersionCheck {
-    param([string]$Cmd, [string[]]$CmdArgs, [string]$ExtraPath = $env:Path)
-    $originalPath = $env:Path
-    try {
-        $resolved = $Cmd
-        if ($Cmd -notmatch '[\\/]') {
-            $env:Path = $ExtraPath
-            $found = Get-Command $Cmd -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $found) { return $null }
-            $resolved = $found.Source
-        } elseif (-not (Test-Path $Cmd)) {
-            return $null
-        }
-        $argParts = @('/d', '/c', (ConvertTo-QuotedArg $resolved))
-        foreach ($a in $CmdArgs) { $argParts += (ConvertTo-QuotedArg $a) }
-        $psi = New-Object System.Diagnostics.ProcessStartInfo
-        $psi.FileName  = 'cmd.exe'
-        $psi.Arguments = ($argParts -join ' ')
-        $psi.RedirectStandardOutput = $true
-        $psi.RedirectStandardError  = $true
-        $psi.UseShellExecute = $false
-        $proc = [System.Diagnostics.Process]::Start($psi)
-        $stdout = $proc.StandardOutput.ReadToEnd()
-        $null = $proc.StandardError.ReadToEnd()
-        if (-not $proc.WaitForExit(5000)) {
-            try { $proc.Kill() } catch {}
-            return $null
-        }
-        return $stdout
-    } catch {
-        return $null
-    } finally {
-        $env:Path = $originalPath
-    }
-}
-
-function Test-CommandInstalled([string]$Cmd) {
-    $out = Invoke-VersionCheck -Cmd $Cmd -CmdArgs @('--version') -ExtraPath (Get-AugmentedPath)
-    return Get-SemVer $out
-}
-
-# ══════════════════════════════════════════════════════════════════════
-# Node.js — install-for-kroot-adk.sh 의 ensure_node() 와 동일한 4단계 판정:
-#   1) nvm(nvm4w) 있음 + 관리 버전 중 $MinNodeVersion 이상 존재 → 그 최신을 nvm use 로 활성화
-#   2) nvm 있음 + 기준 이상 없음 → nvm install latest 후 nvm use
-#   3) nvm 없음 + 전역(PATH) 에 기준 이상 존재 → 그대로 사용(winget 미실행)
-#   4) nvm 없음 + 전역에도 없음 → winget 으로 최신 LTS 설치
-# ══════════════════════════════════════════════════════════════════════
-function Get-NvmInstalledVersions {
-    if (-not (Get-Command nvm -ErrorAction SilentlyContinue)) { return @() }
-    $out = & nvm list 2>$null | Out-String
-    return ([regex]::Matches($out, '\d+\.\d+\.\d+') | ForEach-Object { $_.Value })
-}
-
-function Get-NvmLatestMeetingMin {
-    $best = $null
-    foreach ($v in (Get-NvmInstalledVersions)) {
-        if ((Get-VersionGE $v $MinNodeVersion) -and ((-not $best) -or (Get-VersionGE $v $best))) { $best = $v }
-    }
-    return $best
-}
-
-function Install-NodeViaNvm {
-    $latest = Get-NvmLatestMeetingMin
-    if (-not $latest) {
-        Write-Info "nvm: no installed Node >= $MinNodeVersion — installing the latest version via nvm..."
-        & nvm install latest | Out-Null
-        $latest = Get-NvmLatestMeetingMin
-        if (-not $latest) {
-            Write-Warn "nvm install latest did not produce a version >= $MinNodeVersion."
-            return $null
-        }
-    }
-    Write-Info "nvm: activating Node $latest (nvm use)..."
-    try { & nvm use $latest 2>$null | Out-Null } catch {
-        Write-Warn "nvm use $latest failed — Node may still work if it was already the active version."
-    }
-    return $latest
-}
-
-# 순수 $env:Path(증강 전) 위에서 발견되는 모든 node 실행파일 — 여러 전역 설치가 공존하는
-# 드문 케이스 대비(install-for-kroot-adk.sh 의 `type -a` 와 동일 목적).
-function Get-GlobalNodeCandidates {
-    return (Get-Command node -All -ErrorAction SilentlyContinue) | ForEach-Object { $_.Source } | Select-Object -Unique
-}
-
-function Get-GlobalNodeVersion {
-    $best = $null
-    foreach ($p in (Get-GlobalNodeCandidates)) {
-        $out = Invoke-VersionCheck -Cmd $p -CmdArgs @('--version') -ExtraPath $env:Path
-        $v = Get-SemVer $out
-        if ($v -and ((-not $best) -or (Get-VersionGE $v $best))) { $best = $v }
-    }
-    if ($best -and (Get-VersionGE $best $MinNodeVersion)) { return $best }
-    # 순수 PATH 에 기준을 만족하는 버전이 없다 — 표준 설치 경로까지 넓혀서 재탐색.
-    $v = Test-CommandInstalled 'node'
-    if ($v -and (Get-VersionGE $v $MinNodeVersion)) { return $v }
-    return $null
-}
-
-function Confirm-Node {
-    if (Get-Command nvm -ErrorAction SilentlyContinue) {
-        Write-Info 'nvm detected — resolving Node.js through nvm...'
-        $chosen = Install-NodeViaNvm
-        if ($chosen) { Write-Ok "Node.js $chosen is ready (via nvm)."; return }
-        Write-Warn 'nvm-based Node setup failed — falling back to a global winget install.'
-    }
-
-    $chosen = Get-GlobalNodeVersion
-    if ($chosen) { Write-Ok "Node.js $chosen is already installed globally (>= $MinNodeVersion) — using it."; return }
-
-    if (-not (Test-Winget)) {
-        Write-Err "No Node.js >= $MinNodeVersion found, and winget is unavailable — install Node.js manually."
-        return
-    }
-    Write-Info "No Node.js >= $MinNodeVersion found — installing the latest LTS via winget..."
-    Install-WingetPackage 'OpenJS.NodeJS.LTS' 'Node.js (LTS)' $null $null $null
-}
-
-# ══════════════════════════════════════════════════════════════════════
-# Python — install-for-kroot-adk.sh 의 ensure_python() 과 동일한 3단 폴백. Windows 의
-# python.org 설치기는 python.exe 만 만들고(python3 없음), 게다가 미설치 상태에서도 "앱 실행
-# 별칭"(App Execution Alias) 스텁이 python.exe/python3.exe 를 PATH 에 미리 심어둔다(실행하면
-# "Python" 만 출력·비정상 종료코드 — 버전 숫자 없음). 커맨드 존재만으로는 설치 여부를 구분할
-# 수 없어, 신뢰도 순으로 확인한다: 1) 레지스트리(PythonCore) 2) py 런처(`py -3`) 3) `python`.
-# ══════════════════════════════════════════════════════════════════════
-function Get-PythonRegistryDirs {
-    $roots = @(
-        'HKLM:\SOFTWARE\Python\PythonCore',
-        'HKCU:\SOFTWARE\Python\PythonCore',
-        'HKLM:\SOFTWARE\WOW6432Node\Python\PythonCore'
-    )
-    $dirs = @()
-    foreach ($root in $roots) {
-        if (Test-Path $root) {
-            Get-ChildItem $root -ErrorAction SilentlyContinue | ForEach-Object {
-                $ipPath = Join-Path $_.PSPath 'InstallPath'
-                if (Test-Path $ipPath) {
-                    $val = Get-ItemProperty -Path $ipPath -ErrorAction SilentlyContinue
-                    $prop = $val.PSObject.Properties['(default)']
-                    if ($prop -and $prop.Value) { $dirs += $prop.Value }
-                }
-            }
-        }
-    }
-    return $dirs
-}
-
-function Get-Python3Version {
-    $best = $null
-    foreach ($dir in (Get-PythonRegistryDirs)) {
-        $exe = Join-Path $dir 'python.exe'
-        if (Test-Path $exe) {
-            $out = Invoke-VersionCheck -Cmd $exe -CmdArgs @('--version')
-            $v = Get-SemVer $out
-            if ($v -and $v.StartsWith('3.') -and ((-not $best) -or (Get-VersionGE $v $best))) { $best = $v }
-        }
-    }
-    if ($best) { return $best }
-
-    $out = Invoke-VersionCheck -Cmd 'py' -CmdArgs @('-3', '--version') -ExtraPath (Get-AugmentedPath)
-    $v = Get-SemVer $out
-    if ($v -and $v.StartsWith('3.')) { return $v }
-
-    $out = Invoke-VersionCheck -Cmd 'python' -CmdArgs @('--version') -ExtraPath (Get-AugmentedPath)
-    $v = Get-SemVer $out
-    if ($v -and $v.StartsWith('3.')) { return $v }
-
-    return $null
-}
-
-function Confirm-Python {
-    $ver = Get-Python3Version
-    if ($ver) { Write-Ok "Python 3 is already installed. ($ver)"; return }
-
-    if (-not (Test-Winget)) {
-        Write-Warn 'winget not found — cannot install Python automatically. Install Python 3 manually.'
-        return
-    }
-
-    $pyid = Get-LatestPythonId
-    Write-Info "Installing Python ($pyid) — this may take a few minutes..."
-    # --override 는 winget 의 기본 무인 인자를 대체해 설치기(EXE)에 직접 전달된다. PrependPath=0
-    # 은 python.org 설치기의 "Add python.exe to PATH" 체크박스에 대응하는 공식 커맨드라인
-    # 프로퍼티 — 요청대로 이 옵션을 끈 채로 설치한다(레지스트리 등록은 이 옵션과 무관하게
-    # 이뤄지므로 Get-Python3Version 의 1단계가 설치 직후에도 재탐지 가능하다).
-    winget install --id $pyid -e --source winget --silent `
-        --accept-package-agreements --accept-source-agreements `
-        --override '/quiet PrependPath=0'
-    if ($LASTEXITCODE -eq 0) {
-        Write-Ok "Python ($pyid) installed. ('Add python.exe to PATH' left unchecked, as requested.)"
-    } else {
-        Write-Warn "Python install returned exit code $LASTEXITCODE — you may need to install it manually."
-        return
-    }
-
-    $ver = Get-Python3Version
-    if ($ver) {
-        Write-Ok "Python $ver is detected (via registry/py launcher) even without being on PATH."
-    } else {
-        Write-Warn 'Could not confirm the installed Python via registry/py launcher/command — its directory may need to be added to PATH manually.'
-    }
-}
-
 # ── prerequisites via winget ─────────────────────────────────────────
 function Test-Winget { [bool](Get-Command winget -ErrorAction SilentlyContinue) }
 
-function Install-WingetPackage($id, $name, $step, $total, $checkCmd) {
+function Install-WingetPackage($id, $name, $step, $total) {
     $prefix = if ($step) { "[$step/$total] " } else { '' }
-    if ($checkCmd) {
-        $ver = Test-CommandInstalled $checkCmd
-        if ($ver) { Write-Ok "${prefix}$name is already installed. ($checkCmd $ver)"; return }
-    } else {
-        $listed = winget list --id $id -e --accept-source-agreements 2>$null | Out-String
-        if ($listed -match [regex]::Escape($id)) { Write-Ok "${prefix}$name is already installed."; return }
-    }
+    $listed = winget list --id $id -e --accept-source-agreements 2>$null | Out-String
+    if ($listed -match [regex]::Escape($id)) { Write-Ok "${prefix}$name is already installed."; return }
     Write-Info "${prefix}Installing $name ($id) — this may take a few minutes..."
     # NOTE: no `| Out-Null` here on purpose — winget prints its own live progress
     # bar (download %, install spinner), so the user sees the install advancing.
@@ -571,25 +300,27 @@ function Get-LatestPythonId {
 }
 
 function Install-Dependencies {
-    Confirm-Node
-
-    if (Test-Winget) {
-        Install-WingetPackage 'Anthropic.ClaudeCode' 'Claude Code' $null $null 'claude'
-    } else {
-        Write-Warn 'winget not found — skipping Claude Code / Git for Windows.'
+    if (-not (Test-Winget)) {
+        Write-Warn 'winget not found — skipping Node.js / Python / Claude Code / Git for Windows.'
         Write-Dim 'Install winget (App Installer) from the Microsoft Store, or install those tools manually.'
+        return
     }
-    if ((-not $SkipGitBash) -and (Test-Winget)) {
-        Install-WingetPackage 'Git.Git' 'Git for Windows (Git Bash)' $null $null 'git'
-    } elseif ($SkipGitBash) {
-        Write-Dim 'Skipped Git for Windows (--SkipGitBash); Claude Code will use PowerShell as its shell tool.'
-    }
+    # Build the list first so we can show "[i/N]" step progress.
+    $pkgs = @(
+        @{ id = 'OpenJS.NodeJS.LTS';    name = 'Node.js (LTS)' }   # for the kroot chat executor
+    )
+    # Python (latest 3.x) — optional (--SkipPython).
+    if (-not $SkipPython) { $pkgs += @{ id = (Get-LatestPythonId); name = 'Python (latest 3.x)' } }
+    $pkgs += @{ id = 'Anthropic.ClaudeCode'; name = 'Claude Code' }   # native install, no npm
+    # Git for Windows is OPTIONAL — it gives Claude Code a real bash for its Bash tool.
+    if (-not $SkipGitBash) { $pkgs += @{ id = 'Git.Git'; name = 'Git for Windows (Git Bash)' } }
 
-    if (-not $SkipPython) {
-        Confirm-Python
-    } else {
-        Write-Dim 'Skipped Python (--SkipPython).'
+    Write-Info "Installing $($pkgs.Count) prerequisite(s) via winget..."
+    for ($i = 0; $i -lt $pkgs.Count; $i++) {
+        Install-WingetPackage $pkgs[$i].id $pkgs[$i].name ($i + 1) $pkgs.Count
     }
+    if ($SkipPython)  { Write-Dim 'Skipped Python (--SkipPython).' }
+    if ($SkipGitBash) { Write-Dim 'Skipped Git for Windows (--SkipGitBash); Claude Code will use PowerShell as its shell tool.' }
 }
 
 # ── main ─────────────────────────────────────────────────────────────
